@@ -86,6 +86,20 @@ class DatabricksEmbedding(BaseEmbedding):
             batch = texts[i:i+self.embed_batch_size]
             results.extend(self._get_embeddings_from_databricks(batch))
         return results
+        
+    async def _aget_query_embedding(self, query: str) -> List[float]:
+        """Async version of get_query_embedding."""
+        # For simplicity, we're using the sync version since Databricks endpoints
+        # don't natively support async calls without additional complexity
+        return self._get_query_embedding(query)
+    
+    async def _aget_text_embedding(self, text: str) -> List[float]:
+        """Async version of get_text_embedding."""
+        return self._get_text_embedding(text)
+    
+    async def _aget_text_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """Async version of get_text_embeddings."""
+        return self._get_text_embeddings(texts)
 
 
 class DatabricksLLM(LLM):
@@ -176,6 +190,15 @@ class DatabricksLLM(LLM):
             yield CompletionResponse(text=response_text)
             
         return gen()
+        
+    async def acomplete(self, prompt: str, **kwargs) -> CompletionResponse:
+        """Async version of complete."""
+        # For simplicity, we're using the sync version
+        return self.complete(prompt, **kwargs)
+    
+    async def astream_complete(self, prompt: str, **kwargs) -> CompletionResponseGen:
+        """Async version of stream_complete."""
+        return self.stream_complete(prompt, **kwargs)
 
 
 def setup_llama_index_with_databricks(
