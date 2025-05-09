@@ -1,284 +1,284 @@
 import os
 import requests
 import json
-from typing import List, Dict, Any
+from typing import List, Optional, Any, Dict
 
-import chromadb
-from llama_index import (
+from llama_index.core import (
     VectorStoreIndex,
-    ServiceContext,
     SimpleDirectoryReader,
+    Settings,
     StorageContext,
-    load_index_from_storage
+    Document,
 )
-from llama_index.vector_stores import ChromaVectorStore
-from llama_index.embeddings import BaseEmbedding
-from llama_index.llms import BaseLLM, CompletionResponse, LLMMetadata
-from llama_index.callbacks import CallbackManager
+from llama_index.vector_stores.chroma import ChromaVectorStore
+from llama_index.core.node_parser import SentenceSplitter
+from llama_index.llms.custom import CustomLLM
+from llama_index.embeddings.custom import CustomEmbedding
+import chromadb
 
-
-# 1. Custom Embedding Model using Databricks Endpoint
-class DatabricksEmbeddingModel(BaseEmbedding):
-    """Custom embedding model that uses a Databricks model serving endpoint."""
-    
+class DatabricksEmbedding(CustomEmbedding):
+    """
+    Custom embedding class for Databricks embedding model serving
+    """
     def __init__(
         self,
-        endpoint_url: str,
-        api_token: str,
-        model_name: str = "embedding-model",
-        embed_batch_size: int = 10
+        databricks_host: str,
+        model_endpoint: str,
+        token: str,
+        embed_batch_size: int = 10,
     ):
-        self.endpoint_url = endpoint_url
-        self.api_token = api_token
-        self.model_name = model_name
+        """
+        Initialize the Databricks embedding model
+        
+        Args:
+            databricks_host: Databricks workspace host URL
+            model_endpoint: Name of the model serving endpoint
+            token: Databricks access token
+            embed_batch_size: Batch size for embedding requests
+        """
+        self.databricks_host = databricks_host
+        self.model_endpoint = model_endpoint
+        self.token = token
         self.embed_batch_size = embed_batch_size
-        super().__init__()
-    
-    def _get_query_embedding(self, query: str) -> List[float]:
-        """Get embedding for a query."""
-        return self._get_text_embedding(query)
-    
-    def _get_text_embedding(self, text: str) -> List[float]:
-        """Get embedding for a text."""
-        headers = {
-            "Authorization": f"Bearer {self.api_token}",
+        self.headers = {
+            "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
         }
-        
-        payload = {
-            "inputs": text
-        }
-        
-        response = requests.post(self.endpoint_url, headers=headers, json=payload)
-        
-        if response.status_code != 200:
-            raise Exception(f"Error from Databricks API: {response.text}")
-        
-        embedding = response.json()["embeddings"]
-        return embedding
+        self.api_url = f"{self.databricks_host}/serving-endpoints/{self.model_endpoint}/invocations"
     
+    def _get_embeddings_from_databricks(self, texts: List[str]) -> List[List[float]]:
+        """
+        Get embeddings from Databricks model serving endpoint
+        
+        Args:
+            texts: List of text strings to embed
+            
+        Returns:
+            List of embedding vectors
+        """
+        try:
+            payload = {"inputs": texts}
+            response = requests.post(self.api_url, headers=self.headers, json=payload)
+            response.raise_for_status()
+            
+            # Assuming the response format is {"embeddings": [[0.1, 0.2, ...], ...]}
+            result = response.json()
+            if "embeddings" in result:
+                return result["embeddings"]
+            else:
+                # Adapt to different response formats if needed
+                return result
+                
+        except Exception as e:
+            print(f"Error getting embeddings from Databricks: {e}")
+            raise
+
+    def _get_query_embedding(self, query: str) -> List[float]:
+        """Get query embedding."""
+        return self._get_embeddings_from_databricks([query])[0]
+
+    def _get_text_embedding(self, text: str) -> List[float]:
+        """Get text embedding."""
+        return self._get_embeddings_from_databricks([text])[0]
+
     def _get_text_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Get embeddings for multiple texts."""
-        all_embeddings = []
-        
-        # Process in batches
-        for i in range(0, len(texts), self.embed_batch_size):
-            batch = texts[i:i+self.embed_batch_size]
-            
-            headers = {
-                "Authorization": f"Bearer {self.api_token}",
-                "Content-Type": "application/json"
-            }
-            
-            payload = {
-                "inputs": batch
-            }
-            
-            response = requests.post(self.endpoint_url, headers=headers, json=payload)
-            
-            if response.status_code != 200:
-                raise Exception(f"Error from Databricks API: {response.text}")
-            
-            batch_embeddings = response.json()["embeddings"]
-            all_embeddings.extend(batch_embeddings)
-        
-        return all_embeddings
+        """Get text embeddings."""
+        return self._get_embeddings_from_databricks(texts)
 
 
-# 2. Custom LLM using Databricks Model Serving Endpoint
-class DatabricksLLM(BaseLLM):
-    """Custom LLM that uses a Databricks model serving endpoint."""
-    
+class DatabricksLLM(CustomLLM):
+    """
+    Custom LLM class for Databricks LLM model serving
+    """
     def __init__(
         self,
-        endpoint_url: str,
-        api_token: str,
-        model_name: str = "llm-model",
+        databricks_host: str,
+        model_endpoint: str,
+        token: str,
         temperature: float = 0.7,
-        max_tokens: int = 512
+        max_tokens: int = 512,
     ):
-        self.endpoint_url = endpoint_url
-        self.api_token = api_token
-        self.model_name = model_name
+        """
+        Initialize the Databricks LLM
+        
+        Args:
+            databricks_host: Databricks workspace host URL
+            model_endpoint: Name of the model serving endpoint
+            token: Databricks access token
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens to generate
+        """
+        self.databricks_host = databricks_host
+        self.model_endpoint = model_endpoint
+        self.token = token
         self.temperature = temperature
         self.max_tokens = max_tokens
-        super().__init__()
-    
-    @property
-    def metadata(self) -> LLMMetadata:
-        """Get LLM metadata."""
-        return LLMMetadata(
-            model_name=self.model_name,
-            max_tokens=self.max_tokens
-        )
-    
-    def complete(self, prompt: str, **kwargs) -> CompletionResponse:
-        """Complete a prompt."""
-        headers = {
-            "Authorization": f"Bearer {self.api_token}",
+        self.headers = {
+            "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
         }
-        
-        payload = {
-            "prompt": prompt,
-            "temperature": kwargs.get("temperature", self.temperature),
-            "max_tokens": kwargs.get("max_tokens", self.max_tokens),
+        self.api_url = f"{self.databricks_host}/serving-endpoints/{self.model_endpoint}/invocations"
+    
+    @property
+    def metadata(self) -> Dict[str, Any]:
+        """Get LLM metadata."""
+        return {
+            "model_name": f"databricks-{self.model_endpoint}",
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
         }
-        
-        response = requests.post(self.endpoint_url, headers=headers, json=payload)
-        
-        if response.status_code != 200:
-            raise Exception(f"Error from Databricks API: {response.text}")
-        
-        completion = response.json()["completion"]
-        return CompletionResponse(text=completion)
     
-    def stream_complete(self, prompt: str, **kwargs):
-        """Stream completion not implemented for this example."""
-        raise NotImplementedError("Streaming completion not implemented")
-
-
-# 3. Main RAG Pipeline
-class RAGPipeline:
-    """Main RAG pipeline using LlamaIndex, ChromaDB, and Databricks endpoints."""
-    
-    def __init__(
-        self,
-        embedding_endpoint_url: str,
-        embedding_api_token: str,
-        llm_endpoint_url: str,
-        llm_api_token: str,
-        chroma_persist_dir: str = "./chroma_db",
-        index_persist_dir: str = "./storage",
-        collection_name: str = "document_collection"
-    ):
-        # Initialize embedding model
-        self.embedding_model = DatabricksEmbeddingModel(
-            endpoint_url=embedding_endpoint_url,
-            api_token=embedding_api_token
-        )
-        
-        # Initialize LLM
-        self.llm = DatabricksLLM(
-            endpoint_url=llm_endpoint_url,
-            api_token=llm_api_token
-        )
-        
-        # Initialize ChromaDB
-        self.chroma_client = chromadb.PersistentClient(path=chroma_persist_dir)
+    def complete(self, prompt: str, **kwargs) -> Any:
+        """
+        Complete a prompt using the Databricks LLM
+        """
         try:
-            self.chroma_collection = self.chroma_client.get_collection(collection_name)
-            print(f"Using existing collection: {collection_name}")
-        except:
-            self.chroma_collection = self.chroma_client.create_collection(collection_name)
-            print(f"Created new collection: {collection_name}")
-        
-        # Initialize vector store
-        self.vector_store = ChromaVectorStore(chroma_collection=self.chroma_collection)
-        
-        # Initialize storage context
-        self.storage_context = StorageContext.from_defaults(
-            vector_store=self.vector_store,
-            persist_dir=index_persist_dir
-        )
-        
-        # Initialize service context
-        self.service_context = ServiceContext.from_defaults(
-            llm=self.llm,
-            embed_model=self.embedding_model,
-            callback_manager=CallbackManager([])
-        )
-        
-        # Initialize index
-        self.index = None
-        self.index_persist_dir = index_persist_dir
-        self.collection_name = collection_name
-    
-    def ingest_documents(self, document_dir: str):
-        """Ingest documents from a directory."""
-        try:
-            # Load existing index if available
-            self.index = load_index_from_storage(
-                storage_context=self.storage_context,
-                service_context=self.service_context
-            )
-            print("Loaded existing index")
-        except:
-            # Create new index if not available
-            documents = SimpleDirectoryReader(document_dir).load_data()
-            print(f"Loaded {len(documents)} documents")
+            # Adapt this payload structure based on your specific model's requirements
+            payload = {
+                "inputs": prompt,
+                "parameters": {
+                    "temperature": kwargs.get("temperature", self.temperature),
+                    "max_tokens": kwargs.get("max_tokens", self.max_tokens),
+                }
+            }
             
-            self.index = VectorStoreIndex.from_documents(
-                documents,
-                storage_context=self.storage_context,
-                service_context=self.service_context
-            )
+            response = requests.post(self.api_url, headers=self.headers, json=payload)
+            response.raise_for_status()
             
-            # Persist index
-            self.index.storage_context.persist(persist_dir=self.index_persist_dir)
-            print(f"Created and persisted new index")
-    
-    def query(self, question: str, num_results: int = 3) -> Dict[str, Any]:
-        """Query the RAG pipeline."""
-        if self.index is None:
-            raise ValueError("Index not initialized. Call ingest_documents first.")
-        
-        # Create query engine
-        query_engine = self.index.as_query_engine(
-            similarity_top_k=num_results
-        )
-        
-        # Get response
-        response = query_engine.query(question)
-        
-        # Format result
-        result = {
-            "answer": response.response,
-            "source_documents": []
-        }
-        
-        # Add source documents if available
-        if hasattr(response, "source_nodes"):
-            for node in response.source_nodes:
-                result["source_documents"].append({
-                    "text": node.node.text,
-                    "score": node.score,
-                    "metadata": node.node.metadata
-                })
-        
-        return result
+            result = response.json()
+            # Adjust the response parsing based on your model's output format
+            # This is an example and might need to be modified
+            if isinstance(result, dict) and "predictions" in result:
+                return result["predictions"][0]
+            elif isinstance(result, list):
+                return result[0]
+            else:
+                return str(result)
+                
+        except Exception as e:
+            print(f"Error completing prompt with Databricks LLM: {e}")
+            raise
+
+    def stream_complete(self, prompt: str, **kwargs) -> Any:
+        """
+        Stream complete a prompt (if your endpoint supports streaming)
+        """
+        # This is a simplified implementation that doesn't actually stream
+        # Implement real streaming if your Databricks endpoint supports it
+        return self.complete(prompt, **kwargs)
 
 
-# 4. Example usage
-def main():
-    # Environment variables (for production, use proper secret management)
-    embedding_endpoint_url = os.environ.get("DATABRICKS_EMBEDDING_ENDPOINT")
-    embedding_api_token = os.environ.get("DATABRICKS_EMBEDDING_TOKEN")
-    llm_endpoint_url = os.environ.get("DATABRICKS_LLM_ENDPOINT")
-    llm_api_token = os.environ.get("DATABRICKS_LLM_TOKEN")
+def create_chroma_index(
+    documents_dir: str,
+    databricks_host: str,
+    embedding_endpoint: str,
+    llm_endpoint: str,
+    access_token: str,
+    collection_name: str = "llamaindex_collection",
+    persist_dir: str = "./chroma_db"
+):
+    """
+    Create a ChromaDB vector store index from documents using Databricks models
     
-    # Initialize RAG pipeline
-    rag = RAGPipeline(
-        embedding_endpoint_url=embedding_endpoint_url,
-        embedding_api_token=embedding_api_token,
-        llm_endpoint_url=llm_endpoint_url,
-        llm_api_token=llm_api_token
+    Args:
+        documents_dir: Directory containing documents to index
+        databricks_host: Databricks workspace host URL
+        embedding_endpoint: Name of the embedding model serving endpoint
+        llm_endpoint: Name of the LLM model serving endpoint
+        access_token: Databricks access token
+        collection_name: Name of the ChromaDB collection
+        persist_dir: Directory to persist the ChromaDB data
+    
+    Returns:
+        The LlamaIndex VectorStoreIndex object
+    """
+    # Initialize Databricks models
+    embed_model = DatabricksEmbedding(
+        databricks_host=databricks_host,
+        model_endpoint=embedding_endpoint,
+        token=access_token
     )
     
-    # Ingest documents
-    rag.ingest_documents("./documents")
+    llm_model = DatabricksLLM(
+        databricks_host=databricks_host,
+        model_endpoint=llm_endpoint,
+        token=access_token
+    )
     
-    # Query
-    question = "What is the capital of France?"
-    result = rag.query(question)
+    # Configure global settings
+    Settings.embed_model = embed_model
+    Settings.llm = llm_model
+    Settings.node_parser = SentenceSplitter(chunk_size=1024)
     
-    print(f"Question: {question}")
-    print(f"Answer: {result['answer']}")
+    # Create ChromaDB client and collection
+    db = chromadb.PersistentClient(path=persist_dir)
+    chroma_collection = db.get_or_create_collection(collection_name)
     
-    if result["source_documents"]:
-        print("Sources:")
-        for i, doc in enumerate(result["source_documents"]):
-            print(f"  {i+1}. {doc['text'][:100]}... (Score: {doc['score']})")
+    # Create vector store
+    vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+    storage_context = StorageContext.from_defaults(vector_store=vector_store)
+    
+    # Load documents
+    documents = SimpleDirectoryReader(documents_dir).load_data()
+    
+    # Create index
+    index = VectorStoreIndex.from_documents(
+        documents,
+        storage_context=storage_context,
+    )
+    
+    return index
+
+
+def query_index(index, query_text, similarity_top_k=3):
+    """
+    Query the index
+    
+    Args:
+        index: LlamaIndex VectorStoreIndex
+        query_text: Query string
+        similarity_top_k: Number of top results to retrieve
+        
+    Returns:
+        Response from the query engine
+    """
+    # Create query engine
+    query_engine = index.as_query_engine(similarity_top_k=similarity_top_k)
+    
+    # Get response
+    response = query_engine.query(query_text)
+    
+    return response
+
+
+def main():
+    # Databricks configuration
+    databricks_host = "https://your-databricks-workspace.cloud.databricks.com"  # Replace with your Databricks host
+    access_token = "your-databricks-access-token"  # Replace with your access token
+    embedding_endpoint = "embedding-model-endpoint"  # Replace with your embedding model endpoint name
+    llm_endpoint = "llm-model-endpoint"  # Replace with your LLM endpoint name
+    
+    # Path to your documents
+    documents_dir = "./documents"
+    
+    # Create index
+    index = create_chroma_index(
+        documents_dir=documents_dir,
+        databricks_host=databricks_host,
+        embedding_endpoint=embedding_endpoint,
+        llm_endpoint=llm_endpoint,
+        access_token=access_token
+    )
+    
+    # Sample query
+    query_text = "What are the main points in these documents?"
+    response = query_index(index, query_text)
+    
+    print(f"Query: {query_text}")
+    print(f"Response: {response}")
+    
+    # You can also persist the index for later use
+    # index.storage_context.persist()
 
 
 if __name__ == "__main__":
