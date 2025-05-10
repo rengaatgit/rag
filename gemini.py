@@ -1,7 +1,7 @@
 import os
 import json
 from llama_index.core import Document, Settings, VectorStoreIndex, StorageContext
-from llama_index.core.response.schema import ResponseMode # For specifying response synthesis mode
+from llama_index.core.response_synthesizers import ResponseMode # For specifying response synthesis mode
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.openai import OpenAI as OpenAI_LLM # Renamed to avoid confusion
 from llama_index.vector_stores.chroma import ChromaVectorStore
