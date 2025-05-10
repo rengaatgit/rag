@@ -1,0 +1,29 @@
+[
+  {
+    "commit_hash": "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0",
+    "author_name": "John Doe",
+    "author_email": "john.doe@example.com",
+    "date": "2024-05-10T14:30:00+00:00",
+    "subject": "Fix: Critical bug in payment processing",
+    "body": "This commit addresses a critical bug where payments were failing under certain conditions.\nThe fix involves validating user input more thoroughly and ensuring transaction atomicity.",
+    "stats": "src/main/java/com/example/payment/PaymentService.java | 12 ++++++------\n src/test/java/com/example/payment/PaymentServiceTest.java | 8 ++++++++\n 2 files changed, 14 insertions(+), 6 deletions(-)"
+  },
+  {
+    "commit_hash": "b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0u1",
+    "author_name": "Jane Smith",
+    "author_email": "jane.smith@example.com",
+    "date": "2024-05-09T10:15:00+00:00",
+    "subject": "Feat: Implement new user dashboard",
+    "body": "Adds a new dashboard for users to view their activity and manage settings.\nIncludes widgets for recent activity, account summary, and quick links.",
+    "stats": "app/controllers/dashboard_controller.rb | 35 +++++++++++++++++++++++++++++++++++\n app/views/dashboard/index.html.erb    | 75 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n config/routes.rb                      |  1 +\n 3 files changed, 111 insertions(+)"
+  },
+  {
+    "commit_hash": "c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0u1v2",
+    "author_name": "John Doe",
+    "author_email": "john.doe@example.com",
+    "date": "2024-05-08T18:00:00+00:00",
+    "subject": "Refactor: Authentication module",
+    "body": "Refactored the authentication module for better code clarity and to prepare for OAuth2 integration.\nNo functional changes in this commit.",
+    "stats": "lib/auth.py | 150 ++++++++++++++++++++++++------------------------\n tests/test_auth.py |  50 ++++++++++++++++--------\n 2 files changed, 100 insertions(+), 100 deletions(-)"
+  }
+]
