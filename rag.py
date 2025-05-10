@@ -291,3 +291,5 @@ if __name__ == "__main__":
     response = query_index(index, query)
     print(f"Query: {query}")
     print(f"Response: {response}")
+    # Note: Ensure to replace the endpoint URLs and token with your actual Databricks credentials.
+    # The above code is a simplified example and may require adjustments based on your specific use case.

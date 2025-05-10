@@ -45,4 +45,4 @@ response = query_engine.query("What did the author do growing up?")
 print("===========================================")
 print("Question: What did the author do growing up?")
 print("DBRX Response:", response)
-print("===========================================")
+
