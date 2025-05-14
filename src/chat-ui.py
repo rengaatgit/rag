@@ -3,14 +3,14 @@ import time
 import os
 from pathlib import Path
 from datetime import datetime
-import config.vars as vars
+
 
 
 # Create uploads directory if it doesn't exist
-FILE_UPLOAD_FOLDER = vars.FILE_UPLOAD_FOLDER
+FILE_UPLOAD_FOLDER = 'data/file_uploads'  # Define your upload folder
 Path(FILE_UPLOAD_FOLDER).mkdir(exist_ok=True)
 
-URL_UPLOAD_FOLDER=vars.URL_UPLOAD_FOLDER# Create uploads directory if it doesn't exist
+URL_UPLOAD_FOLDER='data/url_uploads'  # Define your URL upload folder
 Path(URL_UPLOAD_FOLDER).mkdir(exist_ok=True)
 
 def save_uploaded_file(file):
