@@ -1,0 +1,8 @@
+llama-index==0.12.35
+llama-index-core==0.12.35
+llama-index-embeddings-databricks
+llama-index-llms-databricks
+chromadb==1.0.8
+gradio
+pypdf==4.2.0
+python-dotenv

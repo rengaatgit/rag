@@ -1,1 +1,4 @@
-.env
+rag/.env
+rag/data
+*data*
+*__*

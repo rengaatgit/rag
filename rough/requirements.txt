@@ -1,0 +1,12 @@
+llama-index==0.12.35
+llama-index-core==0.12.35
+llama-index-embeddings-databricks
+llama-index-llms-databricks
+llama-index-vector-stores-chroma==0.4.1
+llama-index-llms-ollama
+llama-index-embeddings-openai
+openai
+chromadb==1.0.8
+gradio
+pypdf
+python-dotenv
