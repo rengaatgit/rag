@@ -1,7 +1,7 @@
 #https://bhavikjikadara.medium.com/llamaindex-chroma-building-a-simple-rag-pipeline-cd67fc184190
 # 
 # # To install these libraries, you can run the following commands:
-pip install chromadb llama-index
+##pip install chromadb llama-index
 import chromadb
 from llama_index.core import PromptTemplate, Settings, SimpleDirectoryReader, StorageContext, VectorStoreIndex
 from llama_index.core.node_parser import SentenceSplitter
@@ -57,11 +57,3 @@ query_engine = index.as_query_engine(
 response = query_engine.query("Do you have experience with Python?")
 print(response.response)
 
-
-'Yes, I can confirm that Diana Morales has extensive experience working 
-with Python as a Data Scientist at Accenture. According to her resume, 
-she listed Python as one of her core skills, indicating a strong 
-proficiency in the programming language. Additionally, her projects and 
-achievements highlight her ability to leverage Python for various data 
-science tasks, such as natural language processing (NLP), machine learning, 
-and data visualizations.'

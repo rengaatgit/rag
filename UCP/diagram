@@ -1,0 +1,15 @@
+    Note over Cron,Monitor: Reference Folder Monitoring
+    Cron->>Monitor: Trigger check
+    Monitor->>Process: New PDF detected
+    Process->>Embed: Generate embeddings
+    Embed->>Process: Return vectors
+    Process->>ChromaDB: Store reference vectors
+    
+    Note over Gradio,LLM: User Document Processing
+    Gradio->>Process: Upload document
+    Process->>Embed: Generate embeddings
+    Embed->>Process: Return vectors
+    Process->>ChromaDB: Query compliance
+    ChromaDB->>Process: Similarity scores
+    Process->>LLM: Check compliance
+    LLM->>Gradio: Compliance result
