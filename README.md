@@ -31,3 +31,12 @@ NAT Gateway	$30
 Outbound Data Transfer	$8.40
 Monitoring & Logging	$25
 Total	~$608.90
+
+
+
+ls tx-services_*.zip | \
+awk -F'[_.]' '{print $0, $2, $3}' | \
+sort -k2,2r -k3,3nr | \
+head -1 | \
+awk '{print $1}'
+
