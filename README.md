@@ -34,9 +34,10 @@ Total	~$608.90
 
 
 
-ls tx-services_*.zip | \
+grep -oP 'tx-services_\d{8}\.\d+\.zip' input.txt | \
 awk -F'[_.]' '{print $0, $2, $3}' | \
 sort -k2,2r -k3,3nr | \
 head -1 | \
 awk '{print $1}'
+
 
