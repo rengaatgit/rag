@@ -1,0 +1,145 @@
+import os
+import glob
+from typing import List
+
+from langchain.document_loaders import PyPDFLoader, TextLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.vectorstores import Chroma
+from langchain_core.embeddings import Embeddings
+from langchain_core.language_models import LanguageModel
+from langchain.chains import RetrievalQA
+from langgraph.graph import StateGraph, END
+from langgraph.graph.schema import BaseState
+from langchain_core.runnables import Runnable
+
+# === MCP (Model Context Protocol) Adapters ===
+from langchain_core.mcp.embeddings import OpenAIEmbeddingsMCP
+from langchain_core.mcp.language_models import OpenAILLMMCP
+
+# --- Configuration ---
+DATA_DIRS = {
+    "git-log": "./git-log",
+    "apps-manual": "./apps-manual",
+    "rules": "./rules",
+    "coding": "./coding",
+}
+
+MCP_CONFIG = {
+    "embedding": {
+        "type": "openai",
+        "model": "text-embedding-3-large",
+        "api_url": "https://<databricks-api-url>",
+        "api_key": "<your-databricks-token>"
+    },
+    "llm": {
+        "type": "openai",
+        "model": "gpt-4o",
+        "api_url": "https://<databricks-api-url>",
+        "api_key": "<your-databricks-token>"
+    }
+}
+
+# --- Helper functions ---
+def get_embedding_mcp() -> Embeddings:
+    cfg = MCP_CONFIG["embedding"]
+    return OpenAIEmbeddingsMCP(model=cfg["model"], api_url=cfg["api_url"], api_key=cfg["api_key"])
+
+def get_llm_mcp() -> LanguageModel:
+    cfg = MCP_CONFIG["llm"]
+    return OpenAILLMMCP(model=cfg["model"], api_url=cfg["api_url"], api_key=cfg["api_key"])
+
+def load_documents(folder: str) -> List:
+    docs = []
+    for file_path in glob.glob(os.path.join(folder, "*")):
+        if file_path.endswith(".pdf"):
+            loader = PyPDFLoader(file_path)
+        else:
+            loader = TextLoader(file_path)
+        docs.extend(loader.load())
+    return docs
+
+def split_documents(docs: List):
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    return splitter.split_documents(docs)
+
+def embed_and_store(docs: List, collection_name: str):
+    embeddings = get_embedding_mcp()
+    vectordb = Chroma.from_documents(documents=docs, embedding=embeddings, collection_name=collection_name, persist_directory=f"./chroma_store/{collection_name}")
+    vectordb.persist()
+
+def retrieve_relevant_docs(query: str, collection_name: str):
+    embeddings = get_embedding_mcp()
+    vectordb = Chroma(persist_directory=f"./chroma_store/{collection_name}", collection_name=collection_name, embedding_function=embeddings)
+    retriever = vectordb.as_retriever()
+    return retriever.get_relevant_documents(query)
+
+def augment_query_with_context(query: str, documents: List):
+    context = "\n".join([doc.page_content for doc in documents])
+    return f"Answer the following question using the context below:\n\nContext:\n{context}\n\nQuestion: {query}"
+
+def call_llm(augmented_query: str):
+    llm = get_llm_mcp()
+    return llm.invoke(augmented_query)
+
+# --- LangGraph Nodes ---
+class RAGState(BaseState):
+    query: str
+    collection_name: str
+    documents: List = []
+    context_query: str = ""
+    answer: str = ""
+
+def retrieve_node(state: RAGState) -> RAGState:
+    docs = retrieve_relevant_docs(state.query, state.collection_name)
+    state.documents = docs
+    return state
+
+def augment_node(state: RAGState) -> RAGState:
+    state.context_query = augment_query_with_context(state.query, state.documents)
+    return state
+
+def llm_node(state: RAGState) -> RAGState:
+    state.answer = call_llm(state.context_query)
+    return state
+
+def monitor_node(state: RAGState) -> RAGState:
+    print("[MONITOR] RAGState snapshot:", state)
+    return state
+
+# --- Graph Construction ---
+graph_builder = StateGraph(RAGState)
+graph_builder.add_node("retrieve", retrieve_node)
+graph_builder.add_node("augment", augment_node)
+graph_builder.add_node("llm", llm_node)
+graph_builder.add_node("monitor", monitor_node)
+
+graph_builder.set_entry_point("retrieve")
+graph_builder.add_edge("retrieve", "augment")
+graph_builder.add_edge("augment", "llm")
+graph_builder.add_edge("llm", "monitor")
+graph_builder.add_edge("monitor", END)
+
+graph = graph_builder.compile()
+
+# --- Ingestion Phase ---
+for folder_name, path in DATA_DIRS.items():
+    print(f"[INGEST] Processing folder: {folder_name}")
+    raw_docs = load_documents(path)
+    split_docs = split_documents(raw_docs)
+    embed_and_store(split_docs, folder_name)
+
+# --- Execution Example ---
+user_query = "What recent commits are related to logging in git?"
+if "git" in user_query:
+    collection = "git-log"
+elif "manual" in user_query:
+    collection = "apps-manual"
+elif "rule" in user_query:
+    collection = "rules"
+elif "code" in user_query:
+    collection = "coding"
+else:
+    collection = "git-log"  # default fallback
+
+final_state = graph.invoke({"query": user_query, "collection_name": collection})
+print("Final Answer:", final_state.answer)
