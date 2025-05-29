@@ -1,0 +1,781 @@
+# rag_project/
+# ├── .env (Create this file for your API keys and URLs)
+# ├── main.py
+# ├── config.py
+# ├── requirements.txt
+# ├── document_processing/
+# │   ├── __init__.py
+# │   ├── loader.py
+# │   └── embedding_factory.py  # Renamed from embedder.py
+# ├── vector_store/
+# │   ├── __init__.py
+# │   └── chroma_manager.py
+# ├── llm/
+# │   ├── __init__.py
+# │   └── llm_factory.py        # Renamed from databricks_llm.py
+# ├── graph/
+# │   ├── __init__.py
+# │   ├── state.py
+# │   └── builder.py
+# └── data/ (Create these folders and add your files)
+#     ├── git-log/
+#     │   └── example.log
+#     ├── apps-manual/
+#     │   └── manual.pdf
+#     ├── rules/
+#     │   └── ucp600.pdf
+#     └── coding/
+#         └── script.txt
+
+# ==============================================================================
+# .env (Example - Create this file in the rag_project directory)
+# ==============================================================================
+"""
+# --- Core Model Provider Configuration ---
+# Choose your model provider: "DATABRICKS_OPENAI" or "OPENAI_DIRECT"
+# If not set, defaults to "DATABRICKS_OPENAI" (see config.py)
+# MODEL_PROVIDER="DATABRICKS_OPENAI"
+
+# --- Databricks OpenAI Configuration (if MODEL_PROVIDER="DATABRICKS_OPENAI") ---
+DATABRICKS_API_TOKEN="your_databricks_api_token"
+# For embeddings (e.g., text-embedding-3-large)
+DATABRICKS_EMBEDDINGS_API_URL="your_databricks_embeddings_endpoint_url"
+# For LLM (e.g., gpt-4o)
+DATABRICKS_LLM_API_URL="your_databricks_llm_endpoint_url"
+
+# Example Databricks endpoint URLs:
+# DATABRICKS_EMBEDDINGS_API_URL="https://<your-workspace>.databricks.com/serving-endpoints/text-embedding-3-large-endpoint/invocations"
+# DATABRICKS_LLM_API_URL="https://<your-workspace>.databricks.com/serving-endpoints/gpt-4o-endpoint/invocations"
+
+# --- Direct OpenAI Configuration (if MODEL_PROVIDER="OPENAI_DIRECT") ---
+# OPENAI_API_KEY="your_openai_api_key"
+"""
+
+# ==============================================================================
+# requirements.txt
+# ==============================================================================
+"""
+langchain
+langgraph
+langchain-openai
+langchain-community
+chromadb
+pypdf
+tiktoken
+python-dotenv
+"""
+
+# ==============================================================================
+# config.py
+# ==============================================================================
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+import logging
+
+logger = logging.getLogger(__name__)
+
+# Load environment variables from .env file
+load_dotenv()
+
+# --- Model Provider Configuration ---
+# Determines how LLM and Embedding models are accessed.
+# Supported values: "DATABRICKS_OPENAI", "OPENAI_DIRECT"
+# Add more providers as needed (e.g., "AZURE_OPENAI", "HUGGINGFACE_LOCAL")
+MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "DATABRICKS_OPENAI").upper()
+logger.info(f"Using Model Provider: {MODEL_PROVIDER}")
+
+# --- API Configurations ---
+# Specific to DATABRICKS_OPENAI
+DATABRICKS_API_TOKEN = os.getenv("DATABRICKS_API_TOKEN")
+DATABRICKS_EMBEDDINGS_API_URL = os.getenv("DATABRICKS_EMBEDDINGS_API_URL")
+DATABRICKS_LLM_API_URL = os.getenv("DATABRICKS_LLM_API_URL")
+
+# Specific to OPENAI_DIRECT
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# --- Model Names ---
+# These are generally applicable, but the exact identifier might vary slightly by provider/endpoint.
+# For OpenAI models (direct or via Databricks), these are standard.
+EMBEDDING_MODEL_NAME = "text-embedding-3-large"
+LLM_MODEL_NAME = "gpt-4o"
+
+
+# Base directory of the project
+BASE_DIR = Path(__file__).resolve().parent
+
+# Data Directories
+DATA_DIR = BASE_DIR / "data"
+GIT_LOG_DIR = DATA_DIR / "git-log"
+APPS_MANUAL_DIR = DATA_DIR / "apps-manual"
+RULES_DIR = DATA_DIR / "rules"
+CODING_DIR = DATA_DIR / "coding"
+
+# ChromaDB Configuration
+CHROMA_PERSIST_DIRECTORY = str(BASE_DIR / "chroma_db_store")
+CHROMA_SETTINGS = None # Add specific Chroma settings if needed
+
+# Collection Names (derived from folder names)
+COLLECTION_GIT_LOG = "git-log"
+COLLECTION_APPS_MANUAL = "apps-manual"
+COLLECTION_RULES = "rules"
+COLLECTION_CODING = "coding"
+
+# Mapping folder paths to collection names and file types
+# File types: "text" for .log, .txt; "pdf" for .pdf
+SOURCE_FOLDERS_CONFIG = {
+    COLLECTION_GIT_LOG: {"path": GIT_LOG_DIR, "file_type": "text", "glob": "*.log"},
+    COLLECTION_APPS_MANUAL: {"path": APPS_MANUAL_DIR, "file_type": "pdf", "glob": "*.pdf"},
+    COLLECTION_RULES: {"path": RULES_DIR, "file_type": "pdf", "glob": "*.pdf"},
+    COLLECTION_CODING: {"path": CODING_DIR, "file_type": "text", "glob": "*.txt"},
+}
+
+# Keywords to determine collection from query
+COLLECTION_KEYWORDS = {
+    "git": COLLECTION_GIT_LOG, "log": COLLECTION_GIT_LOG, "commit": COLLECTION_GIT_LOG,
+    "manual": COLLECTION_APPS_MANUAL, "document": COLLECTION_APPS_MANUAL, "guide": COLLECTION_APPS_MANUAL,
+    "rule": COLLECTION_RULES, "ucp": COLLECTION_RULES, "regulation": COLLECTION_RULES,
+    "code": COLLECTION_CODING, "script": COLLECTION_CODING, "program": COLLECTION_CODING,
+    "application": COLLECTION_CODING,
+}
+
+# --- Validate configurations based on MODEL_PROVIDER ---
+if MODEL_PROVIDER == "DATABRICKS_OPENAI":
+    if not all([DATABRICKS_API_TOKEN, DATABRICKS_EMBEDDINGS_API_URL, DATABRICKS_LLM_API_URL]):
+        raise ValueError(
+            "For MODEL_PROVIDER='DATABRICKS_OPENAI', Databricks API token and endpoint URLs "
+            "(DATABRICKS_API_TOKEN, DATABRICKS_EMBEDDINGS_API_URL, DATABRICKS_LLM_API_URL) must be set."
+        )
+elif MODEL_PROVIDER == "OPENAI_DIRECT":
+    if not OPENAI_API_KEY:
+        raise ValueError(
+            "For MODEL_PROVIDER='OPENAI_DIRECT', OPENAI_API_KEY must be set."
+        )
+# Add validation for other providers as they are implemented.
+elif MODEL_PROVIDER not in ["DATABRICKS_OPENAI", "OPENAI_DIRECT"]: # Add other valid providers here
+    raise ValueError(f"Unsupported MODEL_PROVIDER: {MODEL_PROVIDER}. Supported values: 'DATABRICKS_OPENAI', 'OPENAI_DIRECT'.")
+
+
+# ==============================================================================
+# document_processing/__init__.py
+# ==============================================================================
+# This file can be empty or used to export symbols from the package.
+
+# ==============================================================================
+# document_processing/loader.py
+# ==============================================================================
+import logging
+from typing import List
+from langchain_core.documents import Document
+from langchain_community.document_loaders import (
+    DirectoryLoader,
+    TextLoader,
+    PyPDFLoader,
+)
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+from config import SOURCE_FOLDERS_CONFIG
+
+logger = logging.getLogger(__name__)
+
+def load_documents_from_folder(folder_path: str, file_type: str, glob_pattern: str) -> List[Document]:
+    """Loads documents from a specified folder based on file type."""
+    logger.info(f"Loading {file_type} documents from {folder_path} using pattern {glob_pattern}")
+    try:
+        if file_type == "text":
+            loader = DirectoryLoader(folder_path, glob=glob_pattern, loader_cls=TextLoader, show_progress=True, use_multithreading=True, silent_errors=True)
+        elif file_type == "pdf":
+            loader = DirectoryLoader(folder_path, glob=glob_pattern, loader_cls=PyPDFLoader, show_progress=True, use_multithreading=True, silent_errors=True)
+            # For more complex PDFs with images/tables, consider UnstructuredPDFLoader or PyMuPDFLoader
+        else:
+            logger.error(f"Unsupported file type: {file_type}")
+            return []
+        
+        documents = loader.load()
+        logger.info(f"Loaded {len(documents)} documents from {folder_path}")
+        return documents
+    except Exception as e:
+        logger.error(f"Error loading documents from {folder_path}: {e}")
+        return []
+
+def split_documents(documents: List[Document], chunk_size: int = 1000, chunk_overlap: int = 200) -> List[Document]:
+    """Splits loaded documents into smaller chunks."""
+    logger.info(f"Splitting {len(documents)} documents into chunks (size={chunk_size}, overlap={chunk_overlap})")
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        length_function=len,
+        add_start_index=True,
+    )
+    split_docs = text_splitter.split_documents(documents)
+    logger.info(f"Split into {len(split_docs)} chunks.")
+    return split_docs
+
+def load_and_split_all_sources() -> dict[str, List[Document]]:
+    """Loads and splits documents from all configured source folders."""
+    all_split_docs = {}
+    for collection_name, config_val in SOURCE_FOLDERS_CONFIG.items():
+        logger.info(f"Processing source: {collection_name}")
+        docs = load_documents_from_folder(str(config_val["path"]), config_val["file_type"], config_val["glob"])
+        if docs:
+            split_docs = split_documents(docs)
+            all_split_docs[collection_name] = split_docs
+        else:
+            all_split_docs[collection_name] = []
+            logger.warning(f"No documents loaded for collection: {collection_name}")
+    return all_split_docs
+
+
+# ==============================================================================
+# document_processing/embedding_factory.py (Renamed from embedder.py)
+# ==============================================================================
+import logging
+from langchain_openai import OpenAIEmbeddings
+# from langchain_community.embeddings import HuggingFaceEmbeddings # Example for another provider
+from config import (
+    MODEL_PROVIDER,
+    DATABRICKS_EMBEDDINGS_API_URL,
+    DATABRICKS_API_TOKEN,
+    OPENAI_API_KEY,
+    EMBEDDING_MODEL_NAME,
+)
+
+logger = logging.getLogger(__name__)
+
+def get_embeddings_model() -> OpenAIEmbeddings: # Adjust return type if supporting non-OpenAIEmbeddings
+    """
+    Initializes and returns the Embeddings client based on MODEL_PROVIDER.
+    This acts as a factory for embedding models, promoting environment agnosticism.
+    """
+    logger.info(f"Initializing Embeddings model via provider: {MODEL_PROVIDER} for model: {EMBEDDING_MODEL_NAME}")
+    
+    if MODEL_PROVIDER == "DATABRICKS_OPENAI":
+        logger.info("Using Databricks-hosted OpenAI Embeddings.")
+        try:
+            embeddings = OpenAIEmbeddings(
+                openai_api_key=DATABRICKS_API_TOKEN,
+                model=EMBEDDING_MODEL_NAME,
+                openai_api_base=DATABRICKS_EMBEDDINGS_API_URL,
+                # chunk_size=1000 # OpenAI default, or adjust based on Databricks endpoint
+            )
+            logger.info("Databricks OpenAIEmbeddings client initialized.")
+            return embeddings
+        except Exception as e:
+            logger.error(f"Error initializing Databricks OpenAIEmbeddings: {e}")
+            raise
+            
+    elif MODEL_PROVIDER == "OPENAI_DIRECT":
+        logger.info("Using direct OpenAI API for Embeddings.")
+        try:
+            embeddings = OpenAIEmbeddings(
+                openai_api_key=OPENAI_API_KEY,
+                model=EMBEDDING_MODEL_NAME,
+                # openai_api_base is not needed for direct OpenAI, it uses default
+            )
+            logger.info("Direct OpenAIEmbeddings client initialized.")
+            return embeddings
+        except Exception as e:
+            logger.error(f"Error initializing direct OpenAIEmbeddings: {e}")
+            raise
+
+    # Example for adding another provider:
+    # elif MODEL_PROVIDER == "HUGGINGFACE_LOCAL":
+    #     logger.info("Using local HuggingFace Embeddings (e.g., SentenceTransformers).")
+    #     try:
+    #         # Ensure sentence-transformers is installed: pip install sentence-transformers
+    #         embeddings = HuggingFaceEmbeddings(
+    #             model_name="sentence-transformers/all-mpnet-base-v2", # Or any other HF model
+    #             model_kwargs={'device': 'cpu'}, # Or 'cuda' if GPU is available
+    #             encode_kwargs={'normalize_embeddings': True}
+    #         )
+    #         logger.info("Local HuggingFaceEmbeddings client initialized.")
+    #         return embeddings
+    #     except Exception as e:
+    #         logger.error(f"Error initializing HuggingFaceEmbeddings: {e}")
+    #         raise
+            
+    else:
+        logger.error(f"Unsupported MODEL_PROVIDER for embeddings: {MODEL_PROVIDER}")
+        raise ValueError(f"Unsupported MODEL_PROVIDER for embeddings: {MODEL_PROVIDER}")
+
+# ==============================================================================
+# vector_store/__init__.py
+# ==============================================================================
+# This file can be empty
+
+# ==============================================================================
+# vector_store/chroma_manager.py
+# ==============================================================================
+import logging
+from typing import List
+import chromadb
+from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings # Generic Embeddings type hint
+from langchain_community.vectorstores import Chroma
+
+from config import CHROMA_PERSIST_DIRECTORY, CHROMA_SETTINGS
+
+logger = logging.getLogger(__name__)
+
+def get_chroma_client() -> chromadb.PersistentClient:
+    """Initializes and returns a persistent ChromaDB client."""
+    logger.info(f"Initializing ChromaDB client with persist directory: {CHROMA_PERSIST_DIRECTORY}")
+    client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIRECTORY, settings=CHROMA_SETTINGS)
+    return client
+
+def store_documents_in_chroma(
+    documents: List[Document],
+    collection_name: str,
+    embedding_function: Embeddings, # Use generic Embeddings type
+) -> Chroma:
+    """Stores documents in a specified ChromaDB collection."""
+    if not documents:
+        logger.warning(f"No documents provided for collection '{collection_name}'. Returning existing/empty store.")
+        return Chroma(collection_name=collection_name, embedding_function=embedding_function, persist_directory=CHROMA_PERSIST_DIRECTORY)
+
+    logger.info(f"Storing {len(documents)} documents in Chroma collection: {collection_name}")
+    try:
+        vector_store = Chroma.from_documents(
+            documents=documents,
+            embedding=embedding_function,
+            collection_name=collection_name,
+            persist_directory=CHROMA_PERSIST_DIRECTORY,
+        )
+        vector_store.persist()
+        logger.info(f"Successfully stored documents in collection '{collection_name}' and persisted.")
+        return vector_store
+    except Exception as e:
+        logger.error(f"Error storing documents in Chroma collection '{collection_name}': {e}")
+        try:
+            logger.warning(f"Attempting to connect to existing/empty collection '{collection_name}' after storage error.")
+            return Chroma(collection_name=collection_name, embedding_function=embedding_function, persist_directory=CHROMA_PERSIST_DIRECTORY)
+        except Exception as fallback_e:
+            logger.error(f"Fallback to connect to collection '{collection_name}' also failed: {fallback_e}")
+            raise
+
+def get_retriever_for_collection(
+    collection_name: str,
+    embedding_function: Embeddings, # Use generic Embeddings type
+    k_results: int = 5
+):
+    """Gets a retriever for a specific ChromaDB collection."""
+    logger.info(f"Getting retriever for Chroma collection: {collection_name} with k={k_results}")
+    try:
+        vector_store = Chroma(
+            collection_name=collection_name,
+            embedding_function=embedding_function,
+            persist_directory=CHROMA_PERSIST_DIRECTORY,
+        )
+        # Verify collection exists (Chroma init doesn't always fail loudly)
+        client = get_chroma_client()
+        try:
+            client.get_collection(name=collection_name) # Throws if not exists
+        except Exception: 
+             logger.error(f"Chroma collection '{collection_name}' does not exist or cannot be accessed.")
+             return None
+        return vector_store.as_retriever(search_kwargs={"k": k_results})
+    except Exception as e:
+        logger.error(f"Error getting retriever for collection '{collection_name}': {e}")
+        return None
+
+# ==============================================================================
+# llm/__init__.py
+# ==============================================================================
+# This file can be empty
+
+# ==============================================================================
+# llm/llm_factory.py (Renamed from databricks_llm.py)
+# ==============================================================================
+import logging
+from langchain_openai import ChatOpenAI
+# from langchain_community.llms import HuggingFacePipeline # Example for another provider
+from langchain_core.language_models.chat_models import BaseChatModel # For type hinting
+
+from config import (
+    MODEL_PROVIDER,
+    DATABRICKS_LLM_API_URL,
+    DATABRICKS_API_TOKEN,
+    OPENAI_API_KEY,
+    LLM_MODEL_NAME,
+)
+
+logger = logging.getLogger(__name__)
+
+def get_llm_model(temperature: float = 0.7, max_tokens: int = 1024) -> BaseChatModel:
+    """
+    Initializes and returns the ChatModel client based on MODEL_PROVIDER.
+    This acts as a factory for LLMs, promoting environment agnosticism.
+    """
+    logger.info(f"Initializing LLM via provider: {MODEL_PROVIDER} for model: {LLM_MODEL_NAME}")
+
+    if MODEL_PROVIDER == "DATABRICKS_OPENAI":
+        logger.info("Using Databricks-hosted OpenAI LLM.")
+        try:
+            llm = ChatOpenAI(
+                openai_api_key=DATABRICKS_API_TOKEN,
+                model_name=LLM_MODEL_NAME,
+                openai_api_base=DATABRICKS_LLM_API_URL,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            logger.info("Databricks ChatOpenAI client initialized.")
+            return llm
+        except Exception as e:
+            logger.error(f"Error initializing Databricks ChatOpenAI: {e}")
+            raise
+            
+    elif MODEL_PROVIDER == "OPENAI_DIRECT":
+        logger.info("Using direct OpenAI API for LLM.")
+        try:
+            llm = ChatOpenAI(
+                openai_api_key=OPENAI_API_KEY,
+                model_name=LLM_MODEL_NAME,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            logger.info("Direct ChatOpenAI client initialized.")
+            return llm
+        except Exception as e:
+            logger.error(f"Error initializing direct ChatOpenAI: {e}")
+            raise
+
+    # Example for adding another provider (e.g., a local HF model):
+    # elif MODEL_PROVIDER == "HUGGINGFACE_LOCAL":
+    #     logger.info("Using local HuggingFace LLM.")
+    #     try:
+    #         # from transformers import pipeline
+    #         # pipe = pipeline("text-generation", model="gpt2", device=-1) # device=-1 for CPU
+    #         # llm = HuggingFacePipeline(pipeline=pipe)
+    #         # logger.info("Local HuggingFace LLM client initialized.")
+    #         # return llm
+    #         raise NotImplementedError("HuggingFace local LLM provider example needs transformers installed and a model pipeline defined.")
+    #     except Exception as e:
+    #         logger.error(f"Error initializing HuggingFace LLM: {e}")
+    #         raise
+            
+    else:
+        logger.error(f"Unsupported MODEL_PROVIDER for LLM: {MODEL_PROVIDER}")
+        raise ValueError(f"Unsupported MODEL_PROVIDER for LLM: {MODEL_PROVIDER}")
+
+# ==============================================================================
+# graph/__init__.py
+# ==============================================================================
+# This file can be empty
+
+# ==============================================================================
+# graph/state.py
+# ==============================================================================
+from typing import List, Optional, TypedDict
+from langchain_core.documents import Document
+
+class GraphState(TypedDict):
+    """Represents the state of our graph."""
+    query: str
+    collection_name: Optional[str]
+    documents: Optional[List[Document]]
+    context: Optional[str]
+    response: Optional[str]
+    error: Optional[str]
+
+# ==============================================================================
+# graph/builder.py
+# ==============================================================================
+import logging
+from langgraph.graph import StateGraph, END
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+
+from graph.state import GraphState
+from config import COLLECTION_KEYWORDS, SOURCE_FOLDERS_CONFIG
+from vector_store.chroma_manager import get_retriever_for_collection
+from llm.llm_factory import get_llm_model # Updated import
+from document_processing.embedding_factory import get_embeddings_model # Updated import
+
+logger = logging.getLogger(__name__)
+
+# Initialize LLM and Embeddings once using the factories
+try:
+    llm = get_llm_model()
+    embeddings = get_embeddings_model()
+except Exception as e:
+    logger.critical(f"Failed to initialize LLM or Embeddings. Graph cannot be built. Error: {e}")
+    raise SystemExit(f"Critical component (LLM/Embeddings) initialization failed: {e}")
+
+
+# --- Graph Nodes ---
+def determine_collection_node(state: GraphState) -> GraphState:
+    """Determines the collection to query based on keywords in the user's query."""
+    logger.info(f"Node: Determining collection for query: '{state['query']}'")
+    query_lower = state["query"].lower()
+    determined_collection = None
+
+    for keyword, collection_name in COLLECTION_KEYWORDS.items():
+        if keyword in query_lower:
+            if collection_name in SOURCE_FOLDERS_CONFIG:
+                determined_collection = collection_name
+                logger.info(f"Keyword '{keyword}' found. Determined collection: {determined_collection}")
+                break 
+            else: # Should not happen if config is consistent
+                logger.warning(f"Keyword '{keyword}' matched collection '{collection_name}', but it's not in SOURCE_FOLDERS_CONFIG.")
+    
+    if not determined_collection:
+        logger.warning("No specific collection determined from query keywords. Retrieval will be skipped.")
+        return {**state, "collection_name": None, "documents": [], "context": "", "error": "No relevant collection found for query."}
+
+    return {**state, "collection_name": determined_collection, "error": None}
+
+
+def retrieve_documents_node(state: GraphState) -> GraphState:
+    """Retrieves documents from the determined ChromaDB collection."""
+    collection_name = state.get("collection_name")
+    query = state["query"]
+    
+    if not collection_name:
+        logger.info("Node: Retrieve documents - No collection name provided. Skipping retrieval.")
+        return {**state, "documents": [], "context": ""}
+
+    logger.info(f"Node: Retrieving documents from collection '{collection_name}' for query: '{query}'")
+    
+    retriever = get_retriever_for_collection(collection_name, embeddings, k_results=3)
+    if not retriever:
+        logger.error(f"Failed to get retriever for collection '{collection_name}'. No documents retrieved.")
+        return {**state, "documents": [], "context": "", "error": f"Retriever for {collection_name} not available."}
+
+    try:
+        retrieved_docs = retriever.invoke(query)
+        logger.info(f"Retrieved {len(retrieved_docs)} documents from '{collection_name}'.")
+        
+        if not retrieved_docs:
+            logger.info("No documents found by retriever for this query.")
+            context = ""
+        else:
+            context = "\n\n---\n\n".join([doc.page_content for doc in retrieved_docs])
+            logger.debug(f"Formatted context (first 500 chars): {context[:500]}...")
+            
+        return {**state, "documents": retrieved_docs, "context": context, "error": None}
+    except Exception as e:
+        logger.error(f"Error during document retrieval from '{collection_name}': {e}")
+        return {**state, "documents": [], "context": "", "error": f"Retrieval error: {e}"}
+
+
+def generate_response_node(state: GraphState) -> GraphState:
+    """Generates a response using the LLM, augmented with retrieved context if available."""
+    query = state["query"]
+    context = state.get("context", "")
+    logger.info(f"Node: Generating response for query: '{query}'")
+
+    if context:
+        logger.info("Context available, using RAG approach.")
+        prompt_template_str = (
+            "You are a helpful AI assistant. Answer the user's question based on the provided context. "
+            "If the context doesn't contain the answer, clearly state that the answer is not found in the provided information. "
+            "Do not try to answer from your general knowledge if context is provided but irrelevant.\n\n"
+            "Context:\n{context}\n\nQuestion: {query}"
+        )
+    else:
+        logger.info("No context available (e.g., no relevant collection found or no documents retrieved). LLM will answer directly or based on instructions.")
+        # If no context, the LLM should ideally state it cannot answer from provided documents.
+        # Or, if general knowledge answers are allowed when no context, adjust system prompt.
+        prompt_template_str = (
+            "You are a helpful AI assistant. The user asked a question, but no specific context documents were found to be relevant. "
+            "Answer the user's question: {query}. If you cannot answer it without specific documents that were not found, please state that."
+        )
+    
+    prompt_template = ChatPromptTemplate.from_template(prompt_template_str)
+    chain = prompt_template | llm | StrOutputParser()
+    
+    try:
+        if context: # Ensure context is passed if available
+            response_text = chain.invoke({"query": query, "context": context})
+        else:
+            response_text = chain.invoke({"query": query}) # context variable won't be in the prompt if context is empty
+        
+        logger.info(f"Generated response (first 200 chars): {response_text[:200]}...")
+        return {**state, "response": response_text, "error": None}
+    except Exception as e:
+        logger.error(f"Error generating LLM response: {e}")
+        return {**state, "response": "Sorry, I encountered an error while generating the response.", "error": f"LLM generation error: {e}"}
+
+# --- Build Graph ---
+def build_graph_app() -> StateGraph: # Renamed to avoid conflict if 'app' is used elsewhere
+    """Builds and returns the LangGraph StateGraph."""
+    workflow = StateGraph(GraphState)
+
+    workflow.add_node("determine_collection", determine_collection_node)
+    workflow.add_node("retrieve_documents", retrieve_documents_node)
+    workflow.add_node("generate_response", generate_response_node)
+
+    workflow.set_entry_point("determine_collection")
+    workflow.add_edge("determine_collection", "retrieve_documents")
+    workflow.add_edge("retrieve_documents", "generate_response")
+    workflow.add_edge("generate_response", END)
+
+    compiled_app = workflow.compile()
+    logger.info("LangGraph RAG workflow compiled successfully.")
+    return compiled_app
+
+# Simple monitoring/evaluation
+def basic_evaluation(final_state: GraphState):
+    logger.info("\n--- RAG Process Evaluation Summary ---")
+    logger.info(f"Initial Query: {final_state.get('query')}")
+    logger.info(f"Determined Collection: {final_state.get('collection_name', 'N/A')}")
+    num_docs = len(final_state.get('documents', []))
+    logger.info(f"Number of Retrieved Documents: {num_docs}")
+    context_provided = bool(final_state.get('context'))
+    logger.info(f"Context Provided to LLM: {context_provided} (Length: {len(final_state.get('context', '')) if context_provided else 'N/A'})")
+    logger.info(f"Final Response: {final_state.get('response', 'N/A')}")
+    if final_state.get('error'):
+        logger.error(f"Error during processing: {final_state.get('error')}")
+    logger.info("--- End of Evaluation Summary ---")
+
+
+# ==============================================================================
+# main.py
+# ==============================================================================
+import argparse
+import logging
+import sys
+
+# Configure basic logging (should be done as early as possible)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(module)s.%(funcName)s - %(message)s",
+    stream=sys.stdout,
+)
+# Create a logger for this main module
+main_logger = logging.getLogger(__name__) # Use __name__ for module-specific logger
+
+# Import project components after logging is configured
+try:
+    from config import SOURCE_FOLDERS_CONFIG # config.py also sets up its own logger
+    from document_processing.loader import load_and_split_all_sources
+    from document_processing.embedding_factory import get_embeddings_model # Updated
+    from vector_store.chroma_manager import store_documents_in_chroma
+    from graph.builder import build_graph_app, basic_evaluation # Updated
+    from graph.state import GraphState
+except ImportError as e:
+    main_logger.critical(f"Failed to import necessary project components: {e}. Ensure PYTHONPATH is correct or run from project root.")
+    sys.exit(1)
+except SystemExit as e: 
+    main_logger.critical(f"SystemExit during initialization (likely LLM/Embeddings): {e}")
+    sys.exit(1)
+except ValueError as e: # Catch config validation errors
+    main_logger.critical(f"Configuration error: {e}")
+    sys.exit(1)
+
+
+def ingest_data():
+    """Loads, splits, embeds, and stores documents in ChromaDB."""
+    main_logger.info("Starting data ingestion process...")
+    try:
+        # Get embedding model using the factory
+        embeddings_model = get_embeddings_model()
+    except Exception as e:
+        main_logger.error(f"Failed to initialize embeddings model. Ingestion aborted. Error: {e}")
+        return
+
+    all_split_docs_by_collection = load_and_split_all_sources()
+
+    if not any(all_split_docs_by_collection.values()): # Check if any collection has docs
+        main_logger.warning("No documents were loaded or split across all sources. Ingestion process cannot continue.")
+        return
+
+    for collection_name, split_docs in all_split_docs_by_collection.items():
+        if not split_docs:
+            main_logger.info(f"No documents to ingest for collection: {collection_name}")
+            continue
+        
+        main_logger.info(f"Ingesting {len(split_docs)} split documents into collection: {collection_name}")
+        try:
+            store_documents_in_chroma(
+                documents=split_docs,
+                collection_name=collection_name,
+                embedding_function=embeddings_model # Pass the initialized model
+            )
+            main_logger.info(f"Successfully ingested data for collection: {collection_name}")
+        except Exception as e:
+            main_logger.error(f"Failed to ingest data for collection {collection_name}. Error: {e}")
+            # Potentially continue with other collections or stop
+
+    main_logger.info("Data ingestion process completed.")
+
+
+def ask_question(query: str):
+    """Processes a query through the RAG pipeline and prints the response."""
+    main_logger.info(f"Processing query: '{query}'")
+    
+    try:
+        # Build the graph application (this also initializes LLM and Embeddings via factories)
+        rag_application = build_graph_app() 
+    except Exception as e: # Catch errors from build_graph_app, including model init
+        main_logger.error(f"Failed to build the RAG graph. Cannot process query. Error: {e}")
+        print("Sorry, the RAG system could not be initialized.")
+        return
+
+    initial_state: GraphState = {"query": query, "collection_name": None, "documents": None, "context": None, "response": None, "error": None}
+    
+    try:
+        # For verbose streaming of graph states (good for debugging)
+        # config = {"recursion_limit": 50}
+        # for event in rag_application.stream(initial_state, config=config):
+        #     for key, value in event.items():
+        #         main_logger.debug(f"Graph Event - Node: {key}, Output: {value}")
+        # final_state = event[list(event.keys())[-1]] # Get the last state from stream
+        
+        final_state = rag_application.invoke(initial_state)
+
+        main_logger.info("\n--- Final Response ---")
+        print(final_state.get("response", "No response generated."))
+        main_logger.info("--- End of Response ---")
+
+        basic_evaluation(final_state)
+
+    except Exception as e:
+        main_logger.error(f"Error during RAG pipeline execution for query '{query}': {e}", exc_info=True)
+        print("Sorry, an error occurred while processing your question.")
+
+
+def setup_data_directories_and_dummies():
+    """Ensures data directories exist and creates dummy files if needed for testing."""
+    main_logger.info("Setting up data directories...")
+    for coll_name, cfg in SOURCE_FOLDERS_CONFIG.items():
+        data_path = cfg["path"]
+        data_path.mkdir(parents=True, exist_ok=True)
+        
+        # Create dummy files if no files of the specified type exist
+        # This helps in testing the pipeline without needing actual user files initially
+        try:
+            if not list(data_path.glob(cfg["glob"])):
+                # Construct a dummy filename, e.g., dummy_example.log from *.log
+                dummy_extension = cfg["glob"].split('*')[-1] if '*' in cfg["glob"] else ".txt" # Default to .txt if glob is unusual
+                dummy_file_path = data_path / f"dummy_example_for_{coll_name.replace('-', '_')}{dummy_extension}"
+                
+                with open(dummy_file_path, "w") as f:
+                    f.write(f"This is a dummy {cfg['file_type']} file for testing the '{coll_name}' collection.\n"
+                            f"It contains placeholder content related to {coll_name.replace('-', ' ')} topics.\n"
+                            f"For example, if this is for git-log, it might contain: 'commit abc123 Author: Test User. Fix bug #42.'")
+                main_logger.info(f"Created dummy file for testing: {dummy_file_path}")
+        except Exception as e:
+            main_logger.warning(f"Could not create dummy file for {coll_name} in {data_path}: {e}")
+
+
+def run_main():
+    parser = argparse.ArgumentParser(description="RAG Pipeline with Langchain and LangGraph")
+    subparsers = parser.add_subparsers(dest="command", required=True, help="Available commands")
+
+    ingest_parser = subparsers.add_parser("ingest", help="Load, process, and store documents into ChromaDB.")
+    ask_parser = subparsers.add_parser("ask", help="Ask a question to the RAG pipeline.")
+    ask_parser.add_argument("query", type=str, help="The question to ask.")
+
+    args = parser.parse_args()
+
+    setup_data_directories_and_dummies() # Ensure directories and dummy files are ready
+
+    if args.command == "ingest":
+        ingest_data()
+    elif args.command == "ask":
+        ask_question(args.query)
+
+if __name__ == "__main__":
+    run_main()
+
