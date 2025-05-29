@@ -1,0 +1,294 @@
+import os
+import glob
+from typing import Dict, TypedDict, List, Optional, Any
+from langchain_community.document_loaders import TextLoader, PyPDFLoader, PyMuPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import Chroma
+from langchain_core.messages import HumanMessage
+from langgraph.graph import END, StateGraph
+from langchain_core.runnables import RunnableLambda, RunnablePassthrough
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+
+# ===== MCP (Model Context Protocol) Configuration =====
+class MCPConfig:
+    """Environment-agnostic configuration using MCP principles"""
+    def __init__(self):
+        self.embedding_model = "text-embedding-3-large"
+        self.llm_model = "gpt-4o"
+        
+        # Set via environment variables (production) or direct config (development)
+        self.embedding_endpoint = os.getenv("EMBEDDING_ENDPOINT", "https://your-databricks-embedding-url")
+        self.embedding_token = os.getenv("EMBEDDING_TOKEN", "your-databricks-api-token")
+        self.llm_endpoint = os.getenv("LLM_ENDPOINT", "https://your-databricks-llm-url")
+        self.llm_token = os.getenv("LLM_TOKEN", "your-databricks-api-token")
+        
+        # Data paths configuration
+        self.data_paths = {
+            "git-log": "./git-log/*.log",
+            "apps-manual": "./apps-manual/*.pdf",
+            "rules": "./rules/*.pdf",
+            "coding": "./coding/*.txt"
+        }
+        
+        # Processing parameters
+        self.chunk_size = 1000
+        self.chunk_overlap = 200
+        self.top_k = 5
+
+# ===== MCP-Aware Components =====
+class MCPEmbeddings:
+    """MCP-compliant embedding client"""
+    def __init__(self, config: MCPConfig):
+        self.config = config
+        
+    def get_embedding_client(self):
+        from langchain_openai import OpenAIEmbeddings
+        return OpenAIEmbeddings(
+            model=self.config.embedding_model,
+            openai_api_base=self.config.embedding_endpoint,
+            openai_api_key=self.config.embedding_token
+        )
+
+class MCPLLM:
+    """MCP-compliant LLM client"""
+    def __init__(self, config: MCPConfig):
+        self.config = config
+        
+    def get_llm_client(self):
+        from langchain_community.chat_models import ChatDatabricks
+        return ChatDatabricks(
+            target_uri=self.config.llm_endpoint,
+            token=self.config.llm_token,
+            temperature=0.1
+        )
+
+# ===== Document Processing with MCP =====
+class MCPDocumentProcessor:
+    """MCP-compliant document processor"""
+    def __init__(self, config: MCPConfig):
+        self.config = config
+        
+    def load_documents(self) -> Dict[str, List]:
+        all_docs = {}
+        for doc_type, pattern in self.config.data_paths.items():
+            docs = []
+            for file_path in glob.glob(pattern):
+                try:
+                    if doc_type == "git-log" or doc_type == "coding":
+                        loader = TextLoader(file_path)
+                    else:  # PDF handling with better library for tables/images
+                        loader = PyMuPDFLoader(file_path)
+                    docs.extend(loader.load())
+                except Exception as e:
+                    print(f"Error loading {file_path}: {str(e)}")
+            all_docs[doc_type] = docs
+        return all_docs
+
+    def split_documents(self, docs: List) -> List:
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=self.config.chunk_size,
+            chunk_overlap=self.config.chunk_overlap,
+            separators=["\n\n", "\n", "(?<=\. )", " ", ""]
+        )
+        return splitter.split_documents(docs)
+
+# ===== Vector Store Initialization with MCP =====
+class MCPVectorStore:
+    """MCP-compliant vector store manager"""
+    def __init__(self, config: MCPConfig):
+        self.config = config
+        self.embedding_client = MCPEmbeddings(config).get_embedding_client()
+        self.vector_stores = {}
+        
+    def initialize_stores(self):
+        processor = MCPDocumentProcessor(self.config)
+        processed_docs = processor.load_documents()
+        
+        for doc_type, docs in processed_docs.items():
+            if docs:
+                chunks = processor.split_documents(docs)
+                self.vector_stores[doc_type] = Chroma.from_documents(
+                    documents=chunks,
+                    embedding=self.embedding_client,
+                    collection_name=doc_type,
+                    persist_directory=f"./chromadb/{doc_type}"
+                )
+        return self
+
+# ===== LangGraph State Definition with MCP =====
+class GraphState(TypedDict):
+    query: str
+    collection: Optional[str]
+    context: Optional[str]
+    response: Optional[str]
+    evaluation: Optional[Dict[str, Any]]
+
+# ===== Graph Nodes with MCP =====
+class MCPGraphNodes:
+    """MCP-compliant graph nodes"""
+    def __init__(self, config: MCPConfig, vector_stores: Dict):
+        self.config = config
+        self.vector_stores = vector_stores
+        self.llm = MCPLLM(config).get_llm_client()
+        
+    def route_query(self, state: GraphState) -> Dict:
+        """Determine collection based on query using MCP routing"""
+        query = state["query"].lower()
+        
+        # Define routing logic
+        routing_rules = {
+            "git-log": ["git", "commit", "log", "version"],
+            "apps-manual": ["app", "manual", "guide", "documentation", "user"],
+            "rules": ["rule", "ucp600", "regulation", "article"],
+            "coding": ["code", "script", "program", "function", "class"]
+        }
+        
+        for collection, keywords in routing_rules.items():
+            if any(kw in query for kw in keywords):
+                return {"collection": collection}
+        return {"collection": None}
+
+    def retrieve_context(self, state: GraphState) -> Dict:
+        """Retrieve context using MCP-compliant retriever"""
+        if not state["collection"] or state["collection"] not in self.vector_stores:
+            return {"context": None}
+        
+        retriever = self.vector_stores[state["collection"]].as_retriever(
+            search_type="mmr",
+            search_kwargs={"k": self.config.top_k}
+        )
+        docs = retriever.invoke(state["query"])
+        context = "\n\n".join([f"SOURCE: {d.metadata.get('source', 'unknown')}\nCONTENT: {d.page_content}" for d in docs])
+        return {"context": context}
+
+    def generate_response(self, state: GraphState) -> Dict:
+        """Generate response with MCP-compliant LLM"""
+        if not state["context"]:
+            return {"response": "No relevant context found for this query."}
+        
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are an expert assistant. Answer the user's question using ONLY the context below. If unsure, say 'I don't know'.\n\nCONTEXT:\n{context}"),
+            ("human", "{query}")
+        ])
+        
+        chain = (
+            RunnablePassthrough.assign(context=lambda x: x["context"])
+            | prompt
+            | self.llm
+            | StrOutputParser()
+        )
+        
+        response = chain.invoke({
+            "query": state["query"],
+            "context": state["context"]
+        })
+        return {"response": response}
+
+    def evaluate_response(self, state: GraphState) -> Dict:
+        """MCP-compliant response evaluation"""
+        from ragas import evaluate
+        from ragas.metrics import faithfulness, answer_relevancy, context_recall
+        
+        evaluation = {
+            "collection": state.get("collection", "none"),
+            "context_used": bool(state["context"]),
+            "response_length": len(state["response"]) if state["response"] else 0,
+        }
+        
+        # Add RAGAS metrics if context exists
+        if state["context"] and state["response"]:
+            try:
+                dataset = [{
+                    "question": state["query"],
+                    "answer": state["response"],
+                    "contexts": [state["context"]]
+                }]
+                
+                result = evaluate(
+                    dataset,
+                    metrics=[faithfulness, answer_relevancy, context_recall]
+                )
+                evaluation.update(result.to_dict())
+            except Exception as e:
+                evaluation["error"] = f"Evaluation failed: {str(e)}"
+        
+        return {"evaluation": evaluation}
+
+# ===== MCP Workflow Orchestration =====
+class MCPWorkflow:
+    """MCP-compliant RAG workflow"""
+    def __init__(self, config: MCPConfig):
+        self.config = config
+        self.vector_store = MCPVectorStore(config).initialize_stores()
+        self.nodes = MCPGraphNodes(config, self.vector_store.vector_stores)
+        self.graph = self.build_graph()
+        
+    def build_graph(self):
+        """Construct LangGraph workflow with MCP nodes"""
+        workflow = StateGraph(GraphState)
+        
+        # Add nodes
+        workflow.add_node("router", RunnableLambda(self.nodes.route_query))
+        workflow.add_node("retriever", RunnableLambda(self.nodes.retrieve_context))
+        workflow.add_node("generator", RunnableLambda(self.nodes.generate_response))
+        workflow.add_node("evaluator", RunnableLambda(self.nodes.evaluate_response))
+        
+        # Set edges
+        workflow.set_entry_point("router")
+        workflow.add_edge("router", "retriever")
+        workflow.add_edge("retriever", "generator")
+        workflow.add_edge("generator", "evaluator")
+        workflow.add_edge("evaluator", END)
+        
+        return workflow.compile()
+    
+    def invoke(self, query: str) -> Dict[str, Any]:
+        """Execute MCP-compliant RAG pipeline"""
+        results = self.graph.invoke({"query": query})
+        return {
+            "response": results["response"],
+            "collection": results["collection"],
+            "context": results["context"],
+            "evaluation": results["evaluation"]
+        }
+
+# ===== Main Execution with MCP =====
+if __name__ == "__main__":
+    # Initialize MCP configuration
+    config = MCPConfig()
+    
+    # Create and run workflow
+    workflow = MCPWorkflow(config)
+    
+    # Example queries
+    queries = [
+        "What recent changes were made in the git logs?",
+        "How do I configure the application from the manual?",
+        "Explain UCP600 rule 42 about presentation period",
+        "Show me Python code examples for database connection"
+    ]
+    
+    for query in queries:
+        print(f"\n{'='*80}\nProcessing Query: {query}\n{'='*80}")
+        result = workflow.invoke(query)
+        
+        print(f"\nCollection Used: {result['collection']}")
+        print(f"\nResponse:\n{result['response']}\n")
+        print(f"Evaluation Metrics:")
+        for k, v in result['evaluation'].items():
+            print(f"- {k}: {v}")
+        
+        # Save context for debugging
+        with open(f"context_{result['collection']}.txt", "w") as f:
+            f.write(result['context'])
+        
+        print("\n" + "-"*80 + "\n")
+
+
+  class MCPConfig:
+    def __init__(self):
+        self.embedding_model = "text-embedding-3-large"
+        self.llm_model = "gpt-4o"
+        self.embedding_endpoint = os.getenv("EMBEDDING_ENDPOINT", "default-value")
+        self.embedding_token = os.getenv("EMBEDDING_TOKEN", "default-value")
