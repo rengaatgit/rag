@@ -1,0 +1,375 @@
+# mcp_integration.py
+from langchain_mcp_connect import MCPToolkit, MCPServerConfig
+from typing import Dict, Any, List
+import json
+import logging
+
+logger = logging.getLogger(__name__)
+
+class MCPIntegration:
+    """MCP-enabled document processing and tool integration"""
+    
+    def __init__(self):
+        self.toolkit = MCPToolkit()
+        self.servers = self._load_mcp_servers()
+    
+    def _load_mcp_servers(self) -> Dict[str, Any]:
+        """Load MCP server configurations"""
+        try:
+            with open("mcp_servers.json") as f:
+                config = json.load(f)
+            return MCPServerConfig(**config).servers
+        except Exception as e:
+            logger.error(f"MCP config loading failed: {str(e)}")
+            return {}
+
+    def get_tool(self, tool_name: str) -> Any:
+        """Get MCP tool interface"""
+        return self.toolkit.get_tool(tool_name, self.servers)
+
+    def process_with_mcp(self, tool_name: str, payload: Dict) -> Any:
+        """Execute MCP tool operation"""
+        tool = self.get_tool(tool_name)
+        return tool.execute(payload)
+
+# mcp_servers.json
+{
+    "mcpServers": {
+        "git": {
+            "protocol": "http",
+            "endpoint": "http://localhost:8080/mcp/git",
+            "methods": ["log", "diff", "history"]
+        },
+        "filesystem": {
+            "protocol": "http",
+            "endpoint": "http://localhost:8080/mcp/fs",
+            "methods": ["read", "list", "metadata"]
+        },
+        "document_processing": {
+            "protocol": "http",
+            "endpoint": "http://localhost:8080/mcp/docs",
+            "methods": ["chunk", "extract_tables", "ocr_images"]
+        }
+    }
+}
+
+# mcp_document_processor.py
+from typing import List, Dict
+from langchain.schema import Document
+from mcp_integration import MCPIntegration
+import fitz
+import hashlib
+
+class MCPDocumentProcessor:
+    """MCP-compliant document processing"""
+    
+    def __init__(self):
+        self.mcp = MCPIntegration()
+        self.file_tool = self.mcp.get_tool("filesystem")
+        self.doc_tool = self.mcp.get_tool("document_processing")
+
+    def load_documents(self, folder_type: str) -> List[Document]:
+        """MCP-based document loading"""
+        try:
+            # Get file list via MCP
+            files = self.file_tool.execute({
+                "operation": "list",
+                "path": f"./data/{folder_type}"
+            })
+            
+            documents = []
+            for file_info in files:
+                if file_info["type"] == "file":
+                    content = self._process_file(folder_type, file_info)
+                    documents.extend(content)
+            return documents
+            
+        except Exception as e:
+            logger.error(f"MCP document load failed: {str(e)}")
+            return []
+
+    def _process_file(self, folder_type: str, file_info: Dict) -> List[Document]:
+        """Process individual file using MCP services"""
+        file_content = self.file_tool.execute({
+            "operation": "read",
+            "path": file_info["path"]
+        })
+        
+        # MCP-based content processing
+        processed = self.doc_tool.execute({
+            "operation": "process",
+            "content": file_content,
+            "format": file_info["format"],
+            "type": folder_type
+        })
+        
+        return self._create_documents(
+            processed["content"], 
+            file_info["path"],
+            folder_type,
+            processed.get("metadata", {})
+        )
+
+    def _create_documents(self, content: str, path: str, 
+                        folder_type: str, metadata: Dict) -> List[Document]:
+        """Create LangChain documents with MCP metadata"""
+        return [Document(
+            page_content=content,
+            metadata={
+                "source": path,
+                "folder_type": folder_type,
+                "mcp_metadata": metadata,
+                "content_hash": hashlib.md5(content.encode()).hexdigest()
+            }
+        )]
+
+
+# mcp_workflow.py
+from langgraph import StateGraph, Node
+from langgraph.graph import END
+from typing import Dict, Any
+
+class MCPWorkflowBuilder:
+    """LangGraph workflow with MCP integration points"""
+    
+    def __init__(self):
+        self.graph = StateGraph(WorkflowState)
+        self._add_nodes()
+        self._connect_edges()
+
+    def _add_nodes(self):
+        """Add MCP-enabled workflow nodes"""
+        nodes = {
+            "init": Node(self._initialize),
+            "mcp_detect": Node(self._mcp_intent_detection),
+            "mcp_retrieve": Node(self._mcp_context_retrieval),
+            "generate": Node(self._generate_response),
+            "evaluate": Node(self._evaluate_response),
+            "monitor": Node(self._monitor_performance)
+        }
+        
+        for name, node in nodes.items():
+            self.graph.add_node(name, node)
+
+    def _connect_edges(self):
+        """Configure workflow transitions"""
+        self.graph.set_entry_point("init")
+        self.graph.add_edge("init", "mcp_detect")
+        self.graph.add_conditional_edges(
+            "mcp_detect",
+            self._route_processing,
+            {"process": "mcp_retrieve", "skip": "generate"}
+        )
+        self.graph.add_edge("mcp_retrieve", "generate")
+        self.graph.add_edge("generate", "evaluate")
+        self.graph.add_edge("evaluate", "monitor")
+        self.graph.add_edge("monitor", END)
+
+    def _initialize(self, state: WorkflowState) -> WorkflowState:
+        """Initialize workflow state"""
+        state.mcp_context = {}
+        return state
+
+    def _mcp_intent_detection(self, state: WorkflowState) -> WorkflowState:
+        """MCP-based intent detection"""
+        mcp_tool = MCPIntegration().get_tool("nlp")
+        result = mcp_tool.execute({
+            "text": state.user_query,
+            "operations": ["intent_detection", "entity_recognition"]
+        })
+        
+        state.collections = result.get("intents", [])
+        state.mcp_context.update(result["entities"])
+        return state
+
+    def _route_processing(self, state: WorkflowState) -> str:
+        """Determine processing route"""
+        return "process" if not state.collections else "skip"
+
+    def _mcp_context_retrieval(self, state: WorkflowState) -> WorkflowState:
+        """MCP-enabled context retrieval"""
+        retriever = MCPIntegration().get_tool("vector_retrieval")
+        state.context = retriever.execute({
+            "query": state.user_query,
+            "collections": state.collections,
+            "context": state.mcp_context
+        })
+        return state
+
+    def _generate_response(self, state: WorkflowState) -> WorkflowState:
+        """MCP-formatted response generation"""
+        llm_tool = MCPIntegration().get_tool("llm")
+        state.response = llm_tool.execute({
+            "prompt": self._build_mcp_prompt(state),
+            "context": state.context
+        })
+        return state
+
+    def _build_mcp_prompt(self, state: WorkflowState) -> Dict:
+        """Build MCP-standard prompt"""
+        return {
+            "system": "You are an expert assistant",
+            "user": state.user_query,
+            "context": {
+                "retrieved_docs": state.context,
+                "collections": state.collections,
+                "entities": state.mcp_context
+            }
+        }
+
+    def _evaluate_response(self, state: WorkflowState) -> WorkflowState:
+        """MCP-based response evaluation"""
+        eval_tool = MCPIntegration().get_tool("evaluation")
+        state.metrics = eval_tool.execute({
+            "query": state.user_query,
+            "response": state.response,
+            "context": state.context
+        })
+        return state
+
+    def _monitor_performance(self, state: WorkflowState) -> WorkflowState:
+        """MCP monitoring integration"""
+        monitor_tool = MCPIntegration().get_tool("monitoring")
+        monitor_tool.execute({
+            "metrics": state.metrics,
+            "context": state.mcp_context
+        })
+        return state
+
+
+# mcp_vectorstore.py
+from langchain.vectorstores import Chroma
+from mcp_integration import MCPIntegration
+
+class MCPChromaDB:
+    """MCP-wrapped ChromaDB vector store"""
+    
+    def __init__(self, embedding_function):
+        self.mcp = MCPIntegration()
+        self.store = Chroma(
+            collection_name="mcp_chroma",
+            embedding_function=embedding_function,
+            persist_directory="./mcp_chroma"
+        )
+        
+    def mcp_ingest(self, documents: List[Document]):
+        """MCP-standard ingestion process"""
+        self.mcp.process_with_mcp(
+            "vector_ingest",
+            {"documents": self._convert_to_mcp_format(documents)}
+        )
+        self.store.add_documents(documents)
+
+    def mcp_retrieve(self, query: str, collection: str) -> List[Document]:
+        """MCP-compliant retrieval"""
+        result = self.mcp.process_with_mcp(
+            "vector_retrieve",
+            {"query": query, "collection": collection}
+        )
+        return self._convert_from_mcp_format(result)
+
+    def _convert_to_mcp_format(self, docs: List[Document]) -> List[Dict]:
+        return [{
+            "content": doc.page_content,
+            "metadata": doc.metadata
+        } for doc in docs]
+
+    def _convert_from_mcp_format(self, mcp_docs: List[Dict]) -> List[Document]:
+        return [Document(
+            page_content=d["content"],
+            metadata=d["metadata"]
+        ) for d in mcp_docs]
+# mcp_config.py
+from pydantic import BaseModel
+from typing import Dict, Any
+
+class MCPConfig(BaseModel):
+    """Unified MCP configuration model"""
+    servers: Dict[str, Dict[str, Any]]
+    tool_defaults: Dict[str, Any]
+    workflow_params: Dict[str, Any]
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "servers": {
+                    "chroma": {
+                        "type": "vector_db",
+                        "endpoint": "http://localhost:8080/vector",
+                        "collections": ["git-log", "manuals", "rules", "code"]
+                    }
+                },
+                "tool_defaults": {
+                    "retrieval_top_k": 5,
+                    "chunk_size": 1024
+                },
+                "workflow_params": {
+                    "max_cycles": 3,
+                    "confidence_threshold": 0.7
+                }
+            }
+        }
+# mcp_executor.py
+from langgraph.graph import CompiledGraph
+from monitoring import RAGMonitor
+from mcp_integration import MCPIntegration
+
+class MCPExecutor:
+    """MCP-aware workflow executor"""
+    
+    def __init__(self, workflow: CompiledGraph):
+        self.workflow = workflow
+        self.monitor = RAGMonitor()
+        self.mcp = MCPIntegration()
+
+    def execute_query(self, query: str) -> Dict[str, Any]:
+        """Execute full MCP-enabled workflow"""
+        try:
+            # Initialize MCP context
+            mcp_context = self.mcp.process_with_mcp(
+                "session_init",
+                {"query": query}
+            )
+            
+            # Execute workflow
+            result = self.workflow.invoke({
+                "user_query": query,
+                "mcp_context": mcp_context
+            })
+            
+            # MCP-compliant monitoring
+            self.mcp.process_with_mcp(
+                "monitoring",
+                {"metrics": result["metrics"]}
+            )
+            
+            return {
+                "response": result["response"],
+                "sources": result["sources"],
+                "metrics": result["metrics"]
+            }
+            
+        except Exception as e:
+            self.mcp.process_with_mcp(
+                "error_handling",
+                {"error": str(e), "context": mcp_context}
+            )
+            raise
+# Start required MCP servers
+docker run -p 8080:8080 mcp-server-filesystem
+docker run -p 8081:8081 mcp-server-vectorstore
+# .env
+MCP_VECTORSTORE_URL="http://localhost:8081"
+MCP_FILESYSTEM_URL="http://localhost:8080"
+DATABRICKS_EMBEDDING_API_URL="your_api_url"
+DATABRICKS_LLM_API_URL="your_llm_url"
+# main.py
+from mcp_workflow import MCPWorkflowBuilder
+from mcp_executor import MCPExecutor
+
+workflow = MCPWorkflowBuilder().graph.compile()
+executor = MCPExecutor(workflow)
+
+response = executor.execute_query(
+    "Show recent git commits and relevant UCP600 rules"
+)
