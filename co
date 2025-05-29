@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+import os
+import glob
+import requests
+
+# Import document loaders and vector store integration from LangChain.
+from langchain.document_loaders import TextLoader, PyPDFLoader
+from langchain.embeddings.base import Embeddings
+from langchain.vectorstores import Chroma
+from langchain.schema import Document
+
+# --- Folder Configuration for Different File Types ---
+# Each key corresponds to a folder name (and collection name) along with
+# its path and expected file extensions.
+FOLDERS = {
+    "git-log": {
+        "path": "./git-log",
+        "extensions": ["log", "txt"]
+    },
+    "apps-manual": {
+        "path": "./apps-manual",
+        "extensions": ["pdf"]
+    },
+    "rules": {
+        "path": "./rules",
+        "extensions": ["pdf"]
+    },
+    "coding": {
+        "path": "./coding",
+        "extensions": ["txt", "py", "js"]
+    }
+}
+
+# --- MCP (Model Context Protocol) Configuration ---
+# This class encapsulates API endpoints, tokens, and model names so that your
+# environment-specific settings can be provided from a single source.
+class MCPConfig:
+    def __init__(self,
+                 embedding_api_url: str,
+                 embedding_api_key: str,
+                 llm_api_url: str,
+                 llm_api_key: str,
+                 embedding_model: str = "text-embedding-3-large",
+                 llm_model: str = "gpt-4o"):
+        self.embedding_api_url = embedding_api_url
+        self.embedding_api_key = embedding_api_key
+        self.llm_api_url = llm_api_url
+        self.llm_api_key = llm_api_key
+        self.embedding_model = embedding_model
+        self.llm_model = llm_model
+
+# --- Custom Embedding Class Using MCP ---
+# This class wraps Databricks' OpenAI embedding API via MCP context to generate embeddings.
+class DatabricksOpenAIEmbeddings(Embeddings):
+    def __init__(self, mcp_config: MCPConfig):
+        self.mcp = mcp_config
+        self.api_url = mcp_config.embedding_api_url
+        self.api_key = mcp_config.embedding_api_key
+        self.model_name = mcp_config.embedding_model
+
+    def embed_query(self, text: str) -> list:
+        payload = {"input": text, "model": self.model_name}
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        response = requests.post(self.api_url, json=payload, headers=headers)
+        response.raise_for_status()
+        # Assumes the response payload contains a list in data[0]["embedding"]
+        embedding = response.json()["data"][0]["embedding"]
+        return embedding
+
+    def embed_documents(self, texts: list[str]) -> list:
+        return [self.embed_query(text) for text in texts]
+
+# --- Custom LLM Class Using MCP ---
+# This class wraps a Databricks-hosted OpenAI LLM (gpt-4o) using the MCP config.
+class DatabricksOpenAILLM:
+    def __init__(self, mcp_config: MCPConfig):
+        self.mcp = mcp_config
+        self.api_url = mcp_config.llm_api_url
+        self.api_key = mcp_config.llm_api_key
+        self.model_name = mcp_config.llm_model
+
+    def __call__(self, prompt: str) -> str:
+        payload = {"prompt": prompt, "model": self.model_name}
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        response = requests.post(self.api_url, json=payload, headers=headers)
+        response.raise_for_status()
+        # Assumes response is similar to OpenAI's chat format.
+        result = response.json()['choices'][0]['text']
+        return result
+
+# --- Document Loading & Embedding Storage ---
+def load_documents_from_folder(collection_name: str, folder_path: str, extensions: list) -> list:
+    """
+    Loads files from folder_path based on file extensions. PDFs use PyPDFLoader while
+    text files use TextLoader. Documents are tagged with metadata (collection, source file).
+    """
+    docs = []
+    for ext in extensions:
+        file_pattern = os.path.join(folder_path, f"*.{ext}")
+        for file_path in glob.glob(file_pattern):
+            try:
+                if ext.lower() == "pdf":
+                    loader = PyPDFLoader(file_path)
+                else:
+                    loader = TextLoader(file_path)
+                file_docs = loader.load()
+                for doc in file_docs:
+                    doc.metadata["collection"] = collection_name
+                    doc.metadata["source_file"] = os.path.basename(file_path)
+                docs.extend(file_docs)
+            except Exception as e:
+                print(f"Error loading {file_path}: {str(e)}")
+    return docs
+
+def process_and_store_documents(collection_name: str, docs: list, embedding_instance: Embeddings):
+    """
+    Processes the loaded documents and creates a vector store collection in ChromaDB.
+    The collection is named according to the folder (collection_name).
+    """
+    vector_store = Chroma.from_documents(
+        documents=docs,
+        embedding=embedding_instance,
+        collection_name=collection_name
+    )
+    return vector_store
+
+# --- Monitoring and Evaluation Utility ---
+def monitor_log(message: str):
+    print(f"[Monitor] {message}")
+
+# --- Workflow Orchestration with LangGraph ---
+# The following nodes define each stage of the RAG pipeline.
+from langgraph import Graph, Node
+
+class LoadAndStoreNode(Node):
+    """
+    This node loads documents from a specified folder, computes embeddings,
+    and stores them in a ChromaDB collection.
+    """
+    def __init__(self, collection_name: str, folder_config: dict, embedding_instance: Embeddings):
+        self.collection_name = collection_name
+        self.folder_config = folder_config
+        self.embedding_instance = embedding_instance
+
+    def execute(self, inputs: dict) -> dict:
+        monitor_log(f"Loading documents from {self.folder_config['path']} ...")
+        docs = load_documents_from_folder(
+            self.collection_name,
+            self.folder_config["path"],
+            self.folder_config["extensions"]
+        )
+        monitor_log(f"Loaded {len(docs)} documents from collection '{self.collection_name}'.")
+        monitor_log(f"Storing documents in Chroma collection '{self.collection_name}' ...")
+        vector_store = process_and_store_documents(self.collection_name, docs, self.embedding_instance)
+        monitor_log(f"Documents stored successfully in '{self.collection_name}'.")
+        return {"vector_store": vector_store, "collection": self.collection_name}
+
+class RetrieveNode(Node):
+    """
+    This node performs a similarity search on the stored embeddings from a selected collection.
+    """
+    def execute(self, inputs: dict) -> dict:
+        vector_store = inputs["vector_store"]
+        query = inputs["query"]
+        monitor_log("Performing similarity search in vector store ...")
+        retrieved_docs = vector_store.similarity_search(query, k=3)
+        monitor_log(f"Retrieved {len(retrieved_docs)} relevant documents.")
+        return {"retrieved_docs": retrieved_docs, "query": query}
+
+class LLMNode(Node):
+    """
+    This node augments the user query with the retrieved context and calls the LLM.
+    """
+    def __init__(self, llm):
+        self.llm = llm
+
+    def execute(self, inputs: dict) -> dict:
+        query = inputs["query"]
+        retrieved_docs = inputs["retrieved_docs"]
+        context = "\n".join([doc.page_content for doc in retrieved_docs])
+        augmented_prompt = f"Context:\n{context}\n\nUser Query:\n{query}"
+        monitor_log("Calling LLM with augmented prompt ...")
+        response = self.llm(augmented_prompt)
+        monitor_log("LLM has generated a response.")
+        return {"response": response}
+
+# --- Main Pipeline Runner ---
+def run_rag_pipeline(user_query: str, mcp_config: MCPConfig) -> str:
+    """
+    Inspects the user query to choose the corresponding collection based on keywords,
+    initializes the embedding and LLM objects via MCPConfig, builds the LangGraph workflow,
+    and returns the final LLM response.
+    """
+    # Select collection by checking for keywords in the query.
+    if "git" in user_query.lower():
+        selected_collection = "git-log"
+    elif "manual" in user_query.lower():
+        selected_collection = "apps-manual"
+    elif "ucp600" in user_query.lower() or "rules" in user_query.lower():
+        selected_collection = "rules"
+    elif "code" in user_query.lower() or "coding" in user_query.lower():
+        selected_collection = "coding"
+    else:
+        selected_collection = "git-log"  # Fallback/default collection
+
+    monitor_log(f"Selected collection '{selected_collection}' based on query: {user_query}")
+
+    folder_config = FOLDERS.get(selected_collection)
+    if not folder_config:
+        raise ValueError(f"No folder configuration for collection '{selected_collection}'.")
+
+    # Instantiate our custom embedding and LLM objects using MCP.
+    embedding_instance = DatabricksOpenAIEmbeddings(mcp_config)
+    llm_instance = DatabricksOpenAILLM(mcp_config)
+
+    # Build the LangGraph pipeline.
+    graph = Graph()
+    load_store_node = LoadAndStoreNode(selected_collection, folder_config, embedding_instance)
+    retrieve_node = RetrieveNode()
+    llm_node = LLMNode(llm_instance)
+
+    graph.add_node("load_store", load_store_node)
+    graph.add_node("retrieve", retrieve_node)
+    graph.add_node("llm", llm_node)
+
+    # Set up the data connections between nodes.
+    graph.connect("load_store", "retrieve", mapping={"vector_store": "vector_store"})
+    graph.connect("retrieve", "llm", mapping={"retrieved_docs": "retrieved_docs", "query": "query"})
+
+    # Start the workflow with the user query.
+    inputs = {"query": user_query}
+    result = graph.run(initial_inputs=inputs)
+    
+    return result.get("response")
+
+# --- Example Usage ---
+if __name__ == "__main__":
+    # MCP configuration – in practice you may load these from environment variables or secure config storage.
+    EMBEDDING_API_URL = "https://databricks.example.com/api/embedding"
+    EMBEDDING_API_KEY = "your_embedding_api_token"
+    LLM_API_URL = "https://databricks.example.com/api/gpt4o"
+    LLM_API_KEY = "your_llm_api_token"
+    
+    mcp_config = MCPConfig(
+        embedding_api_url=EMBEDDING_API_URL,
+        embedding_api_key=EMBEDDING_API_KEY,
+        llm_api_url=LLM_API_URL,
+        llm_api_key=LLM_API_KEY
+    )
+    
+    # A sample user query that explicitly indicates the desired content type.
+    user_query = "Please show me the latest git logs related to errors."
+    
+    final_response = run_rag_pipeline(user_query, mcp_config)
+    
+    print("\nFinal LLM Response:")
+    print(final_response)
